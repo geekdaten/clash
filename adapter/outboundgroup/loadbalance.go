@@ -114,6 +114,53 @@ func strategyRoundRobin() strategyFn {
 	}
 }
 
+func strategyConsistentHashingBindSrcIp() strategyFn {
+	maxRetry := 5
+	return func(proxies []C.Proxy, metadata *C.Metadata) C.Proxy {
+		key := uint64(murmur3.Sum32([]byte(getKeyWithSrcIp(metadata))))
+		buckets := int32(len(proxies))
+		for i := 0; i < maxRetry; i, key = i+1, key+1 {
+			idx := jumpHash(key, buckets)
+			proxy := proxies[idx]
+			if proxy.Alive() {
+				return proxy
+			}
+		}
+
+		// when availability is poor, traverse the entire list to get the available nodes
+		for _, proxy := range proxies {
+			if proxy.Alive() {
+				return proxy
+			}
+		}
+
+		return proxies[0]
+	}
+}
+
+func getKeyWithSrcIp(metadata *C.Metadata) string {
+	key := ""
+	if metadata.SrcIP != nil {
+		key = metadata.SrcIP.String()
+	}
+	if metadata.Host != "" {
+		// ip host
+		if ip := net.ParseIP(metadata.Host); ip != nil {
+			return key + metadata.Host
+		}
+
+		if etld, err := publicsuffix.EffectiveTLDPlusOne(metadata.Host); err == nil {
+			return key + etld
+		}
+	}
+
+	if metadata.DstIP == nil {
+		return key
+	}
+
+	return key + metadata.DstIP.String()
+}
+
 func strategyConsistentHashing() strategyFn {
 	maxRetry := 5
 	return func(proxies []C.Proxy, metadata *C.Metadata) C.Proxy {
@@ -169,6 +216,8 @@ func NewLoadBalance(option *GroupCommonOption, providers []provider.ProxyProvide
 	switch strategy {
 	case "consistent-hashing":
 		strategyFn = strategyConsistentHashing()
+	case "consistent-hashing-bindsrcip":
+		strategyFn = strategyConsistentHashingBindSrcIp()
 	case "round-robin":
 		strategyFn = strategyRoundRobin()
 	default:
